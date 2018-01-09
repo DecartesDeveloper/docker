@@ -18,6 +18,7 @@ import (
 	opengcs "github.com/Microsoft/opengcs/client"
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/cio"
+	"github.com/docker/docker/pkg/errutils"
 	"github.com/docker/docker/pkg/sysinfo"
 	"github.com/docker/docker/pkg/system"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -1203,7 +1204,13 @@ func (c *client) shutdownContainer(ctr *container) error {
 	if err != nil {
 		c.logger.WithError(err).WithField("container", ctr.id).
 			Debug("failed to shutdown container, terminating it")
-		return c.terminateContainer(ctr)
+		terminateErr := c.terminateContainer(ctr)
+		if terminateErr != nil {
+			c.logger.WithError(terminateErr).WithField("container", ctr.id).
+				Error("failed to terminate container failed after failed shutdown")
+			err = fmt.Errorf("%s: subsequent terminate failed %s", err, terminateErr)
+		}
+		return err
 	}
 
 	return nil
@@ -1234,6 +1241,8 @@ func (c *client) reapProcess(ctr *container, p *process) int {
 		"process":   p.id,
 	})
 
+	var wrappedErr error
+
 	// Block indefinitely for the process to exit.
 	if err := p.hcsProcess.Wait(); err != nil {
 		if herr, ok := err.(*hcsshim.ProcessError); ok && herr.Err != windows.ERROR_BROKEN_PIPE {
@@ -1263,6 +1272,8 @@ func (c *client) reapProcess(ctr *container, p *process) int {
 
 	if err := p.hcsProcess.Close(); err != nil {
 		logger.WithError(err).Warnf("failed to cleanup hcs process resources")
+		exitCode = -1
+		wrappedErr = errutils.WrapNil(wrappedErr, fmt.Errorf("hcsProcess.Close() failed %s", err))
 	}
 
 	var pendingUpdates bool
@@ -1286,13 +1297,17 @@ func (c *client) reapProcess(ctr *container, p *process) int {
 		}
 
 		if err := c.shutdownContainer(ctr); err != nil {
+			exitCode = -1
 			logger.WithError(err).Warn("failed to shutdown container")
+			wrappedErr = errutils.WrapNil(wrappedErr, fmt.Errorf("container shutdown failed: %s", err))
 		} else {
 			logger.Debug("completed container shutdown")
 		}
 
 		if err := ctr.hcsContainer.Close(); err != nil {
+			exitCode = -1
 			logger.WithError(err).Error("failed to clean hcs container resources")
+			wrappedErr = errutils.WrapNil(wrappedErr, fmt.Errorf("container terminate failed: %s", err))
 		}
 	}
 
@@ -1305,6 +1320,7 @@ func (c *client) reapProcess(ctr *container, p *process) int {
 				ExitCode:      uint32(exitCode),
 				ExitedAt:      exitedAt,
 				UpdatePending: pendingUpdates,
+				Error:         wrappedErr,
 			}
 			c.logger.WithFields(logrus.Fields{
 				"container":  ctr.id,

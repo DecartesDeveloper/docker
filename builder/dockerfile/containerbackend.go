@@ -8,6 +8,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/builder"
 	containerpkg "github.com/docker/docker/container"
+	"github.com/docker/docker/pkg/errutils"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -93,6 +94,7 @@ func (c *containerManager) Run(ctx context.Context, cID string, stdout, stderr i
 		close(finished)
 		logCancellationError(cancelErrCh,
 			fmt.Sprintf("a non-zero code from ContainerWait: %d", status.ExitCode()))
+		err = errutils.WrapNil(err, status.Err())
 		return &statusCodeError{code: status.ExitCode(), err: err}
 	}
 
@@ -112,6 +114,9 @@ type statusCodeError struct {
 }
 
 func (e *statusCodeError) Error() string {
+	if e.err == nil {
+		return ""
+	}
 	return e.err.Error()
 }
 
